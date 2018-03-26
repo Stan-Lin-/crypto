@@ -1,0 +1,212 @@
+Applause from you and
+Go to the profile of Ryan Kazanciyan
+Ryan Kazanciyan
+Chief Security Architect @Tanium, Mandiant & PwC alumnus. Coauthor of Incident Response & Computer Forensics, 3rd Ed (2014). Tech consultant for @whoismrrobot.
+Dec 15, 2017
+Mr. Robot Disassembled: eps3.9_shutdown -r
+
+Hello friend. I’m Ryan Kazanciyan, Technical Consultant for Mr. Robot and Chief Security Architect for Tanium. I’ve been working with Kor Adana — Writer, Producer, and mastermind behind the ARG — and the rest of the Mr. Robot team since the second half of Season 2. Throughout Season 3, I’ll be writing about the hacks depicted in the show, how they came together, and their basis in reality.
+
+Spoiler Alert! This post discusses events from the season 3 finale.
+
+As the title implies, “eps3.9_shutdown -r” marks both a conclusion and a new beginning — a reboot — for Elliot and his relationship with Mr. Robot. It’s therefore fitting that the hacks in this episode evoke scenes from season one, and were likewise among the first and last technical elements that Kor and I designed over the past year.
+Password cracking, with a bit of LUKS
+
+During last week’s episode, we saw the contents of the NYPD chain of custody document that Trenton attached to her “killswitch” e-mail to Elliot. It itemized the evidence seized from Romero’s home, which included four keystroke loggers with encrypted data partitions. The NYPD wasn’t able to recover the contents from these devices, and presumably, neither could the FBI.
+Chain of custody form listing evidence from Romero’s home
+
+When Dom gives Elliot access to her FBI computer and Sentinel, he can retrieve forensic images of the keyloggers — but he still has to figure out how to crack the password to view their captured data.
+
+The parameters for this scene posed some interesting technical challenges. The FBI has plenty of computing power to brute force their way through encrypted evidence. It wouldn’t be credible if Elliot stumbled on the password by feeding a common dictionary file through a cracking tool like John the Ripper. Besides, Romero would have been savvy enough to use a long password and a strong encryption algorithm.
+
+I decided that Romero’s keyloggers were designed to store captured data using LUKS, a disk encryption specification for Linux. Among other benefits, the reference implementation for LUKS uses a computationally slow algorithm, which makes it difficult to crack through automated password guessing or brute force.
+
+How can Elliot succeed when the FBI failed? He relies on his knowledge of Romero’s personality, interests, and habits as a hacker to craft a better wordlist. Kor and I ultimately came up with the idea to use music — a song lyric turned into a passphrase. He put together a list of Romero’s favorite artists, and I jammed to some Curtis Mayfield while working on the scene.
+
+Elliot needs a number of tools that wouldn’t be on Dom’s FBI computer. We designed this scene with the assumption that he first SSH’d to an instance of Kali that he set up on a VPS, before proceeding as seen on-screen.
+
+We first see Elliot running PyLyrics to download lyrics for all the songs by Romero’s favorite artists:
+Downloading lyrics to build a targeted password cracking wordlist for Romero’s keyloggers
+
+The output is stored in a single file, “lyrics.txt”, to serve as input for password cracking tools.
+
+In the next (very brief) shot, we see two windows side-by-side. The left window shows the output of a command that lists information about a LUKS disk partition:
+
+cryptsetup luksDump ~/keyintercept_1.raw
+
+Elliot would run this to confirm the type of encryption in use.
+LUKS analysis on the left; starting the password-cracking attack on the right
+
+The window on the right shows the cracking process. I originally wanted to use Hashcat, one of the most popular password recovery tools, for this scene. Unfortunately, Hashcat didn’t introduce support for LUKS until later in 2016. Elliot ends up running an older tool, bruteforce-luks, that can only guess a few dozen passwords per second.
+
+We close in on the right-hand window as Elliot types:
+
+bruteforce-luks -t 8 -f ~/tools/PyLyrics/lyrics.txt ~/keyintercept_1.raw
+
+This command spins up 8 concurrent threads to guess passwords against the disk image “keyintercept_1.raw”, using each line of “lyrics.txt” as input.
+
+After the next jump cut, we see that Elliot’s creativity has paid off. Romero’s password is a line from “Don’t Worry” by Curtis Mayfield:
+
+And if there’s hell below We’re all gonna go
+
+(Yes, that’s the same song used in the opening credits for “The Deuce”. Complete coincidence!)
+
+Elliot proceeds to mount the encrypted LUKS partition by typing:
+
+cryptsetup luksOpen ~/keyintercept_1.raw keyintercept
+Mounting the LUKS partition
+
+He switches to the mounted path containing the keystroke log output, and types less keylog.txt to view its contents.
+
+We never see the actual contents on-screen — we only hear only Elliot’s reaction.
+
+“Romero was just spying on us. He caught someone else exporting the key data.”
+
+And that sets the stage for our final scene.
+
+How realistic was this hack? The depicted steps are all authentic; as usual, I ensured everything could be reproduced end-to-end in a virtual machine using the same tools. But we did take artistic liberties to shorten the time required to crack a LUKS partition, especially given how slow the algorithm is. Elliot’s knowledge and approach maximized his odds, but he still got lucky. It might have taken days or weeks to crack Romero’s password with an extensive wordlist. In any case, that detail doesn’t fundamentally change how the rest of the episode plays out.
+Determining the fate of five/nine
+
+“I transferred the keys from the arcade to a remote virtual machine on our box at home. I then burned it to a CD. You’ll find the seed data and the algorithm embedded in one of those pictures. You’ll know the one.” — Mr. Robot
+
+Elliot returns to his computer and loads the CD full of pictures of him and his father, as we originally saw in season one. I imagined that he’d use a mix of intuition and technical analysis to find the right file. We see him examine several images using a Python script, lsb.py, that performs statistical analysis to search for evidence of steganography — of hidden data otherwise invisible to the naked eye. This particular tool focuses on a common technique whereby the least-significant bit (LSB) of pixel values is used to store other data.
+Analyzing and extracting hidden data from one of the image files
+
+Elliot is convinced that he has found the right image: him and his father dressed as Marty and Doc Brown.
+
+He reviews a hex dump of the first 256 bytes of the file with the command:
+
+xcd -l 256 IMG_5528.jpg
+
+The file header indicates that it is a PNG file — a “lossless” format — not a JPG (the former is more readily used for steganography). He makes a working copy and runs another tool, stepic, to extract any data that’s hidden using the LSB technique:
+
+stepic -d -i IMG_5528_copy.png -o outfile
+
+Elliot’s intuitions were correct. The image contains hidden Python code:
+
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.PublicKey import RSA
+import getpass
+
+infile = raw_input(“File: “)
+f = open(infile, ‘r’)
+password = getpass.getpass()
+f.seek(1024)
+salt = f.read(32)
+
+master = PBKDF2(password, salt, count=10000)
+
+def notrand(n):
+    notrand.i += 1
+    return PBKDF2(master, str(notrand.i), dkLen=n, count=1)
+
+notrand.i = 0
+
+RSA_key = RSA.generate(4096, randfunc=notrand)
+print RSA_key.exportKey()
+
+Kor and I worked through the broad outlines of this scene during the early planning stages of season 3, but I didn’t write the code you see on-screen until much later. It’s short and simple, but I wanted to ensure it was technically accurate so as not to undermine such an important part of the story. And for full disclosure, I’m not a cryptographer — just playing one on TV.
+
+Without digging into the source, let’s break down how this script works. It’s designed to generate an RSA key in a deterministic manner, using three inputs:
+
+    a passphrase
+    a salt / seed value — 32 bytes read from a hard-coded offset in a supplied input file — in this case, an image
+    a “backdoored” random number generator that is deliberately not random (hence the function named “notrand”).
+
+When presented with the same passphrase and seed value, this script will always generate the exact same output. That vulnerability — deliberately introduced by Mr. Robot — is what allows Elliot to regenerate identical copies of the original keys.
+
+If you want to try running the script on your own system, ensure you have a copy of the PyCrypto libraries. It should work with any seed file.
+
+    Ransomware and other encryption attacks often use a symmetric algorithm to encrypt a victims’ data. Afterwards, the symmetric key can be encrypted with the public half of an asymmetric keypair and stored with the victim’s scrambled files. When victims pay the ransom, this allows the attacker to use the private key to decrypt and supply the symmetric key needed to recover the files.
+
+Elliot runs the script, using the same image file as an input to the encryption algorithm:
+The hidden script re-generates an RSA private key
+
+It works. The script spits out an RSA key. With a simple copy & paste, Elliot can set things in motion to undo the five/nine attack. He just has to click send.
+Elliot prepares to send the key to E-Corp’s recovery team. Take note of “From” address.
+Hanging up my hoodie
+
+Working on Mr. Robot has been a labor of love, and seeing it all come together after a year of preparation has been a uniquely rewarding experience. I’m very proud what we created, and the enthusiasm from fans of the show — especially among my friends and peers in the security industry — made every ounce of effort worthwhile.
+
+That said, it’s also a bittersweet turning point for me: after two years as a technical consultant, I’ve made the difficult decision to hang up my hoodie and move on to new opportunities. I feel extremely fortunate to have been a part of the show, and it expanded my horizons and scratched an itch that I didn’t even know I had. It has also been an enormous time commitment, and in the coming year I need to reclaim bandwidth for other emerging endeavors in my professional and personal life.
+
+I will greatly miss working with everyone behind the scenes, but remain excited to see the next season from the unadulterated perspective of a fan — just like when I first started watching!
+
+With that said, I’d be remiss to conclude without a few acknowledgements:
+
+    Adam Brustein, the fantastic artist and designer who brought the screens you see on the show to life. Every shot is painstakingly crafted as an interactive animation to match the appearance and behavior of real software. Of course, his talents go well beyond emulating computer GUIs — check out his site for some of his other work.
+    David Damato and fellow show consultant Andre McGregor, who originally connected me to Kor and the rest of the crew. It all goes back to a serendipitous encounter between Dave and Kor when they co-presented on a panel at the Consumer Electronics Show (CES) in January 2016.
+    Sam Esmail, Kyle Bradstreet, and the rest of the producers and writers for eagerly engaging with myself and the other show consultants — and for making us feel like part of the family.
+    And most importantly, Kor Adana, for providing me with the opportunity and support to contribute to so much of this season, the patience to work through some of my crazier ideas, and the mentorship to guide me through learning this new craft. I can’t say enough about his passion for the show and its fans, or his tireless attention to detail. (Not to mention his work on the ARG on top of it all!) If you haven’t already done so, check out Kor’s series of interviews with Josh Wigler at THR. It’s the screenwriting equivalent to my technical write-ups for this season, and really showcases how much detail and thought goes into each episode.
+
+Finally, thanks to each and every one of you who took the time to read “Mr. Robot: Disassembled” over the course of this season. I was blown away by the amount of support you shared in your tweets, comments, and e-mails. I likewise loved seeing all of the questions, and even the heated debates, inspired by some of the hacks we created. I hoped that these write-ups would both educate and entertain, and am grateful that they found a willing audience.
+
+    SecurityHackingMr RobotTechnologyTelevision
+
+One clap, two clap, three clap, forty?
+
+By clapping more or less, you can signal to us which stories really stand out.
+Go to the profile of Ryan Kazanciyan
+Ryan Kazanciyan
+
+Chief Security Architect @Tanium, Mandiant & PwC alumnus. Coauthor of Incident Response & Computer Forensics, 3rd Ed (2014). Tech consultant for @whoismrrobot.
+More from Ryan Kazanciyan
+Yep, the dongle she finds inside the bag in the other room is meant to be the equivalent of the red…
+The CSAT team definitely should be a bit more careful with their keys, but I’ll cut them some slack if they had to flee in the middle of…
+Go to the profile of Ryan Kazanciyan
+Ryan Kazanciyan
+Also tagged Security
+Password Protect Sensitive Dropbox/Google Drive/iCloud/OneDrive Files
+Go to the profile of Miko
+Miko
+Related reads
+Elliot, Strangelove, and Stage 2
+Go to the profile of Josh H
+Josh H
+Responses
+Stan Lin
+Write a response…
+Stan Lin
+Applause from Ryan Kazanciyan (author)
+Go to the profile of Ibtehaz Shawon
+Ibtehaz Shawon
+Dec 16, 2017
+Hanging up my hoodie
+
+Thanks man! I never waited for a blog-series to publish before. It was really worth reading your blogs about Mr Robot over and over again. And it’s definitely one of my most favorite series!
+
+Thank you :)
+Applause from Ryan Kazanciyan (author)
+Go to the profile of HiroJa’s Thought Bubble
+HiroJa’s Thought Bubble
+Dec 15, 2017
+
+Thank You. Good Fortune To You On Your New Endeavors.🤖
+Conversation with Ryan Kazanciyan.
+Go to the profile of Corey Nachreiner
+Corey Nachreiner
+Dec 16, 2017
+
+Great article as usual. I wait to read these until after I draft my article, but you always have a few details I didn’t find.
+
+BTW, I think there is a small code issue:
+
+The python key code takes input as:
+
+infile = raw_input(“File: “)
+
+Go to the profile of Ryan Kazanciyan
+Ryan Kazanciyan
+Dec 16, 2017
+
+Thanks Corey! Good catch, that one’s on me. When we create shots like this I’ll often provide Kor and our animator with text-based copies of everything shown on-screen, along with screen videos and images to show the layout and flow. Keeping everything in sync gets tricky — especially when making a minor tweak here or there. Maybe Elliot just tweaked…
+Applause from Ryan Kazanciyan (author)
+Go to the profile of Corey Nachreiner
+Corey Nachreiner
+Dec 16, 2017
+
+I figured it was just a small thing, and I like your potential explanation. For a purely story-telling point of viewer, to try to help a non-technical audience keep up… having the display request be “Input filename:” is better than the original “File:” anyway, since it’s more descriptive. So I could see why writer could also want a last minute change…
+
+Next story
+Mr. Robot Disassembled: eps3.8_stage3.torrent
+
